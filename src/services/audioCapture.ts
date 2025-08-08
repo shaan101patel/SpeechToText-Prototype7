@@ -57,11 +57,19 @@ export class AudioCaptureService {
     this.audioChunks = [];
     this.startTime = Date.now();
 
-    // Set up chunk handler if provided
-    if (onChunk) {
-      this.mediaRecorder.ondataavailable = (event) => {
-        if (event.data.size > 0) {
-          this.audioChunks.push(event.data);
+    // Set up data handler to collect all chunks
+    this.mediaRecorder.ondataavailable = (event) => {
+      console.log('Audio chunk received:', {
+        size: event.data.size,
+        type: event.data.type,
+        timestamp: Date.now()
+      });
+      
+      if (event.data.size > 0) {
+        this.audioChunks.push(event.data);
+        
+        // Call onChunk callback if provided
+        if (onChunk) {
           const chunk: AudioChunk = {
             data: event.data,
             timestamp: Date.now(),
@@ -69,11 +77,18 @@ export class AudioCaptureService {
           };
           onChunk(chunk);
         }
-      };
-    }
+      }
+    };
+
+    // Set up error handler
+    this.mediaRecorder.onerror = (event) => {
+      console.error('MediaRecorder error:', event);
+    };
 
     try {
+      // Start recording with timeslice to ensure we get data periodically
       this.mediaRecorder.start(this.config.chunkDuration);
+      console.log('Recording started with chunk duration:', this.config.chunkDuration);
     } catch (error) {
       throw this.createAudioError('RECORDING_FAILED', 'Failed to start recording', error as Error);
     }
@@ -90,11 +105,21 @@ export class AudioCaptureService {
       }
 
       this.mediaRecorder.onstop = () => {
+        console.log('Recording stopped. Total chunks collected:', this.audioChunks.length);
+        console.log('Chunk sizes:', this.audioChunks.map(chunk => chunk.size));
+        
         const audioBlob = new Blob(this.audioChunks, { type: this.config.mimeType });
+        console.log('Final audio blob:', {
+          size: audioBlob.size,
+          type: audioBlob.type,
+          totalChunks: this.audioChunks.length
+        });
+        
         resolve(audioBlob);
       };
 
       this.mediaRecorder.onerror = (error) => {
+        console.error('Error during recording stop:', error);
         reject(this.createAudioError('RECORDING_FAILED', 'Recording failed', error.error));
       };
 
@@ -147,16 +172,29 @@ export class AudioCaptureService {
   private setupMediaRecorder(): void {
     if (!this.audioStream) return;
 
+    // Ensure we have the best supported mime type
+    const mimeType = getBestSupportedMimeType();
+    this.config.mimeType = mimeType;
+
     const options: MediaRecorderOptions = {
-      mimeType: this.config.mimeType,
+      mimeType: mimeType,
     };
 
     // Add bitrate if supported
-    if (this.config.bitRate && this.isOptionSupported(options.mimeType!, 'bitsPerSecond')) {
+    if (this.config.bitRate && this.isOptionSupported(mimeType, 'bitsPerSecond')) {
       options.bitsPerSecond = this.config.bitRate;
     }
 
+    console.log('Setting up MediaRecorder with options:', options);
     this.mediaRecorder = new MediaRecorder(this.audioStream, options);
+    
+    // Log the final configuration
+    console.log('MediaRecorder created:', {
+      mimeType: this.mediaRecorder.mimeType,
+      state: this.mediaRecorder.state,
+      streamActive: this.audioStream.active,
+      audioTracks: this.audioStream.getAudioTracks().length
+    });
   }
 
   private isOptionSupported(mimeType: string, option: string): boolean {

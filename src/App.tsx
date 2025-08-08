@@ -8,8 +8,8 @@ import { useAudioCapture } from './hooks/useAudioCapture';
 import { useTranscription } from './hooks/useTranscription';
 
 function App() {
-  const [apiKey, setApiKey] = useState<string>('');
-  const [isConfigured, setIsConfigured] = useState<boolean>(false);
+  const [apiKey, setApiKey] = useState<string>(import.meta.env.VITE_FAL_AI_API_KEY || '');
+  const [isConfigured, setIsConfigured] = useState<boolean>(!!import.meta.env.VITE_FAL_AI_API_KEY);
 
   // Audio capture hook
   const {
@@ -36,7 +36,7 @@ function App() {
     clearTranscript,
   } = useTranscription({
     apiKey,
-    language: 'en',
+    language: import.meta.env.VITE_DEFAULT_LANGUAGE || 'en',
     task: 'transcribe',
     enableTimestamps: true,
   });
@@ -50,16 +50,12 @@ function App() {
       }
 
       await initialize();
-      await startRecording((chunk) => {
-        // Process audio chunks for near real-time transcription
-        if (chunk.data.size > 0) {
-          processAudio(chunk.data).catch(console.error);
-        }
-      });
+      // Start recording without chunk processing - we'll process on stop
+      await startRecording();
     } catch (error) {
       console.error('Failed to start recording:', error);
     }
-  }, [initialize, startRecording, processAudio, isConfigured]);
+  }, [initialize, startRecording, isConfigured]);
 
   const handleStopRecording = useCallback(async () => {
     try {
@@ -96,14 +92,17 @@ function App() {
               <div>
                 <h3 className="text-sm font-medium text-blue-900">API Configuration Required</h3>
                 <p className="text-sm text-blue-700 mt-1">
-                  You need to configure your fal.ai API key to use the Wizper speech-to-text service.
+                  You need to configure your fal.ai API key. You can either add it to your .env.local file or enter it manually.
+                </p>
+                <p className="text-xs text-blue-600 mt-1">
+                  Tip: Add VITE_FAL_AI_API_KEY=your_key to .env.local for automatic loading
                 </p>
               </div>
               <button
                 onClick={handleConfigureAPI}
                 className="btn-primary text-sm"
               >
-                Configure API Key
+                Enter API Key
               </button>
             </div>
           </div>
@@ -122,7 +121,9 @@ function App() {
           {isConfigured && (
             <div className="flex items-center space-x-2 text-sm text-gray-600">
               <div className="w-2 h-2 bg-green-500 rounded-full"></div>
-              <span>API Configured</span>
+              <span>
+                API Configured {import.meta.env.VITE_FAL_AI_API_KEY ? '(from .env.local)' : '(manual)'}
+              </span>
             </div>
           )}
         </div>
@@ -151,8 +152,8 @@ function App() {
                 <li>• Configure your fal.ai API key first</li>
                 <li>• Click "Start Recording" to begin audio capture</li>
                 <li>• Speak clearly into your microphone</li>
-                <li>• Audio will be processed in chunks for near real-time results</li>
-                <li>• Click "Stop" to finish and get final transcript</li>
+                <li>• Click "Stop" to finish recording and get transcript</li>
+                <li>• Processing happens after recording stops for better accuracy</li>
               </ul>
             </div>
           </div>

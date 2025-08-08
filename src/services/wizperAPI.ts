@@ -1,6 +1,6 @@
 import { WizperResponse, WizperError } from '../types/transcript';
 import { API_CONFIG } from '../utils/constants';
-import { blobToBase64 } from '../utils/audioFormat';
+import { fal } from '@fal-ai/client';
 
 export interface WizperConfig {
   apiKey: string;
@@ -19,34 +19,68 @@ export class WizperAPI {
       enableTimestamps: true,
       ...config,
     };
+
+    // Configure fal.ai client
+    fal.config({
+      credentials: this.config.apiKey,
+    });
   }
 
   /**
-   * Transcribe audio using fal.ai Wizper API
+   * Transcribe audio using fal.ai Wizper API with proper file upload
    */
   async transcribe(audioBlob: Blob): Promise<WizperResponse> {
     try {
-      // Validate file size
+      // Validate audio blob
+      if (audioBlob.size === 0) {
+        throw new Error('Audio blob is empty. Please ensure microphone is working and audio is being captured.');
+      }
+
       if (audioBlob.size > API_CONFIG.MAX_FILE_SIZE) {
         throw new Error(`File size exceeds maximum limit of ${API_CONFIG.MAX_FILE_SIZE / (1024 * 1024)}MB`);
       }
 
-      // Convert blob to base64
-      const audioBase64 = await blobToBase64(audioBlob);
+      console.log('Attempting to transcribe audio blob:', {
+        size: audioBlob.size,
+        type: audioBlob.type
+      });
 
-      const payload = {
-        audio_data: audioBase64,
-        task: this.config.task,
-        language: this.config.language,
-        enable_timestamps: this.config.enableTimestamps,
-      };
+      // Create a File object from the blob
+      const audioFile = new File([audioBlob], 'recording.webm', { 
+        type: audioBlob.type || 'audio/webm;codecs=opus' 
+      });
 
-      const response = await this.makeRequest(payload);
-      return this.parseResponse(response);
+      console.log('Uploading audio file to fal.ai storage...');
+
+      // Use fal.ai client to upload the file and transcribe
+      const result = await fal.subscribe('fal-ai/wizper', {
+        input: {
+          audio_url: audioFile,  // fal.ai client will handle the upload automatically
+          task: this.config.task || 'transcribe',
+          language: this.config.language,
+          chunk_level: 'segment',
+          version: '3'
+        },
+        logs: true,
+        onQueueUpdate: (update) => {
+          console.log('Queue update:', update.status);
+          // Handle logs only for completed status when they're available
+          if (update.status === 'COMPLETED' && 'logs' in update) {
+            const logs = (update as any).logs;
+            if (logs) {
+              logs.forEach((log: any) => console.log('Log:', log.message));
+            }
+          }
+        }
+      });
+
+      console.log('Transcription completed:', result);
+      return this.parseResponse(result);
     } catch (error) {
       if (this.retryCount < API_CONFIG.MAX_RETRIES) {
         this.retryCount++;
         console.warn(`Transcription failed, retrying... (${this.retryCount}/${API_CONFIG.MAX_RETRIES})`);
+        await new Promise(resolve => setTimeout(resolve, 1000)); // Wait 1 second between retries
         return this.transcribe(audioBlob);
       }
       throw this.createWizperError(error);
@@ -54,19 +88,21 @@ export class WizperAPI {
   }
 
   /**
-   * Transcribe audio from URL
+   * Transcribe audio from URL (for existing files)
    */
   async transcribeFromUrl(audioUrl: string): Promise<WizperResponse> {
     try {
-      const payload = {
-        audio_url: audioUrl,
-        task: this.config.task,
-        language: this.config.language,
-        enable_timestamps: this.config.enableTimestamps,
-      };
+      const result = await fal.subscribe('fal-ai/wizper', {
+        input: {
+          audio_url: audioUrl,
+          task: this.config.task || 'transcribe',
+          language: this.config.language,
+          chunk_level: 'segment',
+          version: '3'
+        }
+      });
 
-      const response = await this.makeRequest(payload);
-      return this.parseResponse(response);
+      return this.parseResponse(result);
     } catch (error) {
       throw this.createWizperError(error);
     }
@@ -77,59 +113,21 @@ export class WizperAPI {
    */
   async healthCheck(): Promise<boolean> {
     try {
-      // Create a minimal test request
-      const testPayload = {
-        audio_data: '', // Empty for health check
-        task: 'transcribe',
-      };
-
-      await fetch(API_CONFIG.FAL_AI_BASE_URL, {
-        method: 'POST',
-        headers: this.getHeaders(),
-        body: JSON.stringify(testPayload),
+      // Simple test to verify API key and connectivity
+      await fal.run('fal-ai/wizper', {
+        input: {
+          audio_url: 'https://github.com/ggerganov/whisper.cpp/raw/master/samples/jfk.wav',
+          task: 'transcribe',
+          language: 'en',
+          chunk_level: 'segment',
+          version: '3'
+        }
       });
-
       return true;
     } catch (error) {
       console.warn('Wizper API health check failed:', error);
       return false;
     }
-  }
-
-  private async makeRequest(payload: any): Promise<any> {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), API_CONFIG.REQUEST_TIMEOUT);
-
-    try {
-      const response = await fetch(API_CONFIG.FAL_AI_BASE_URL, {
-        method: 'POST',
-        headers: this.getHeaders(),
-        body: JSON.stringify(payload),
-        signal: controller.signal,
-      });
-
-      clearTimeout(timeoutId);
-
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        throw new Error(`API request failed: ${response.status} ${response.statusText}. ${errorData.detail || ''}`);
-      }
-
-      return await response.json();
-    } catch (error) {
-      clearTimeout(timeoutId);
-      if (error instanceof Error && error.name === 'AbortError') {
-        throw new Error('Request timeout');
-      }
-      throw error;
-    }
-  }
-
-  private getHeaders(): Record<string, string> {
-    return {
-      'Content-Type': 'application/json',
-      'Authorization': `Key ${this.config.apiKey}`,
-    };
   }
 
   private parseResponse(response: any): WizperResponse {
@@ -140,11 +138,19 @@ export class WizperAPI {
       throw new Error(response.error);
     }
 
+    // Map the response format to our expected format
+    const segments = response.chunks?.map((chunk: any) => ({
+      text: chunk.text,
+      start: chunk.timestamp?.[0] || 0,
+      end: chunk.timestamp?.[1] || 0,
+      confidence: 0.9, // fal.ai doesn't provide confidence scores, so we use a default
+    })) || [];
+
     return {
       text: response.text || '',
-      segments: response.segments || [],
+      segments,
       language: response.language,
-      duration: response.duration,
+      duration: segments.length > 0 ? segments[segments.length - 1].end : 0,
     };
   }
 
@@ -173,5 +179,12 @@ export class WizperAPI {
    */
   updateConfig(newConfig: Partial<WizperConfig>): void {
     this.config = { ...this.config, ...newConfig };
+    
+    // Update fal.ai client configuration if API key changed
+    if (newConfig.apiKey) {
+      fal.config({
+        credentials: newConfig.apiKey,
+      });
+    }
   }
 }
